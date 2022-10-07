@@ -111,18 +111,60 @@ class InvLeakyReLU(nn.Module):
 
 
 class FlowStep(nn.Module):
+    __constants__ = ['in_channels', 'epsilon', 'negative_slope']
+    in_channels: int
+    epsilon: float
+    negative_slope: float
+
     def __init__(self, in_channels, epsilon=1e-6, negative_slope=0.01):
         super(FlowStep, self).__init__()
         self.actnorm = Actnorm(in_channels, epsilon)
         self.inv_1x1_conv = InvConv1d(in_channels)
         self.leaky_relu = InvLeakyReLU(negative_slope)
+        self.in_channels = in_channels
+        self.epsilon = epsilon
+        self.negative_slope = negative_slope
 
-    def forward(self, x, log_det_acc=None):
+    def forward(self, x, log_det_acc=None, activate=True):
         x, log_det_acc = self.actnorm(x, log_det_acc)
         x, log_det_acc = self.InvConv1d(x, log_det_acc)
-        return self.leaky_relu(x, log_det_acc)
+        if activate:
+            return self.leaky_relu(x, log_det_acc)
+        else:
+            return x, log_det_acc
 
     def reverse(self, y):
         y = self.leaky_relu.reverse(y)
         y = self.inv_1x1_conv.reverse(y)
         return self.actnorm.reverse(y)
+
+
+class FlowScale(nn.Module):
+    __constants__ = ['in_channels', 'k', 'epsilon', 'negative_slope']
+    in_channels: int
+    k: int
+    epsilon: float
+    negative_slope: float
+
+    def __init__(self, in_channels, k, epsilon=1e-6, negative_slope=0.01):
+        super(FlowScale, self).__init__()
+        self.flow_steps = nn.ModuleList(
+            [FlowStep(2*in_channels, epsilon, negative_slope) for _ in range(k)]
+        )
+
+    def forward(self, x, log_det_acc=None, split=True):
+        batch_size, n_channels, n_features = x.shape
+        x_squeezed = x.view(batch_size, n_channels, n_features // 2, 2)
+        x_squeezed = torch.transpose(x_squeezed, 2, 3)
+        x = x_squeezed.view(batch_size, 2 * n_channels, -1)
+
+        for flow_step in self.flow_steps:
+            x, log_det_acc = flow_step(x, log_det_acc)
+
+
+
+
+
+
+
+
