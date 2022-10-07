@@ -29,16 +29,15 @@ class Actnorm(nn.Module):
             self.bias.copy_(-mean)
             self.initialized.fill_(1)
 
-    def forward(self, x, w_log_det=True):
+    def forward(self, x, log_det_acc=None):
         if self.initialized.item() == 0:
             self.init_weights(x)
 
-        if w_log_det:
-            log_det = x.shape[2] * torch.sum(torch.log(torch.abs(self.scale)))
-        else:
-            log_det = None
+        if log_det_acc is not None:
+            with torch.no_grad():
+                log_det_acc += x.shape[2] * torch.sum(log_abs(self.scale))
 
-        return self.scale * (x + self.bias), log_det
+        return self.scale * (x + self.bias), log_det_acc
 
     def reverse(self, y):
         return y / self.scale - self.bias
@@ -71,14 +70,13 @@ class InvConv1d(nn.Module):
         u_tri = self.u_tri * self.u_mask + s_diag
         return l_tri, u_tri
 
-    def forward(self, x, w_log_det=True):
-        if w_log_det:
-            log_det = x.shape[2] * torch.sum(self.log_abs_s)
-        else:
-            log_det = None
+    def forward(self, x, log_det_acc=None):
+        if log_det_acc is not None:
+            with torch.no_grad():
+                log_det_acc += x.shape[2] * torch.sum(self.log_abs_s)
         l_tri, u_tri = self.reconstruct_matrices()
         w = (self.p @ l_tri @ u_tri).unsqeeze(2)
-        return nn.functional.conv1d(x, w), log_det
+        return nn.functional.conv1d(x, w), log_det_acc
 
     def reverse(self, y):
         l_tri, u_tri = self.reconstruct_matrices()
