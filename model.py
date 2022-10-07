@@ -88,25 +88,41 @@ class InvConv1d(nn.Module):
         return nn.functional.conv1d(y, w)
 
 
-class InvertibleLeakyReLU(nn.Module):
+class InvLeakyReLU(nn.Module):
     __constants__ = ['negative_slope']
     negative_slope: float
 
-    def __init__(self, negative_slope):
-        super(InvertibleLeakyReLU, self).__init__()
+    def __init__(self, negative_slope=0.01):
+        super(InvLeakyReLU, self).__init__()
         self.negative_slope = negative_slope
 
-    def forward(self, x, w_log_det=True):
+    def forward(self, x, log_det_acc=None):
         x2 = nn.functional.leaky_relu(x, self.negative_slope)
         with torch.no_grad():
-            if w_log_det:
+            if log_det_acc is not None:
                 batch_size = x.shape[0]
                 exps = torch.count_nonzero((x != x2).view(batch_size))
                 base = torch.full(batch_size, self.negative_slope)
-                log_det = torch.log(torch.pow(base, exps))
-            else:
-                log_det = None
-        return x2, log_det
+                log_det_acc += torch.log(torch.pow(base, exps))
+        return x2, log_det_acc
 
     def reverse(self, y):
         return nn.functional.leaky_relu(y, 1/self.negative_slope)
+
+
+class FlowStep(nn.Module):
+    def __init__(self, in_channels, epsilon=1e-6, negative_slope=0.01):
+        super(FlowStep, self).__init__()
+        self.actnorm = Actnorm(in_channels, epsilon)
+        self.inv_1x1_conv = InvConv1d(in_channels)
+        self.leaky_relu = InvLeakyReLU(negative_slope)
+
+    def forward(self, x, log_det_acc=None):
+        x, log_det_acc = self.actnorm(x, log_det_acc)
+        x, log_det_acc = self.InvConv1d(x, log_det_acc)
+        return self.leaky_relu(x, log_det_acc)
+
+    def reverse(self, y):
+        y = self.leaky_relu.reverse(y)
+        y = self.inv_1x1_conv.reverse(y)
+        return self.actnorm.reverse(y)
