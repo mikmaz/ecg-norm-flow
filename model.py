@@ -9,10 +9,6 @@ def log_abs(x):
     return torch.log(torch.abs(x))
 
 
-def inverse_elu(y, alpha):
-    return torch.where(y > 0, y, torch.log(y / alpha + 1))
-
-
 class Actnorm(nn.Module):
     # TODO add constants
     def __init__(self, in_channels, epsilon=1e-6):
@@ -92,3 +88,27 @@ class InvConv1d(nn.Module):
                                                   upper=True)
         w = (u_tri_inv @ l_tri_inv @ self.p.T).unsqeeze(2)
         return nn.functional.conv1d(y, w)
+
+
+class InvertibleLeakyReLU(nn.Module):
+    __constants__ = ['negative_slope']
+    negative_slope: float
+
+    def __init__(self, negative_slope):
+        super(InvertibleLeakyReLU, self).__init__()
+        self.negative_slope = negative_slope
+
+    def forward(self, x, w_log_det=True):
+        x2 = nn.functional.leaky_relu(x, self.negative_slope)
+        with torch.no_grad():
+            if w_log_det:
+                batch_size = x.shape[0]
+                exps = torch.count_nonzero((x != x2).view(batch_size))
+                base = torch.full(batch_size, self.negative_slope)
+                log_det = torch.log(torch.pow(base, exps))
+            else:
+                log_det = None
+        return x2, log_det
+
+    def reverse(self, y):
+        return nn.functional.leaky_relu(y, 1/self.negative_slope)
