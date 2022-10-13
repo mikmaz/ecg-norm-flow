@@ -94,6 +94,7 @@ class InvLeakyReLU(nn.Module):
 
     def __init__(self, negative_slope=0.01):
         super(InvLeakyReLU, self).__init__()
+        assert negative_slope > 0.
         self.negative_slope = negative_slope
 
     def forward(self, x, log_det_acc=None):
@@ -101,9 +102,11 @@ class InvLeakyReLU(nn.Module):
         with torch.no_grad():
             if log_det_acc is not None:
                 batch_size = x.shape[0]
-                exps = torch.count_nonzero((x != x2).view(batch_size))
-                base = torch.full(batch_size, self.negative_slope)
-                log_det_acc += torch.log(torch.pow(base, exps))
+                non_activated_n = torch.count_nonzero(
+                    (x != x2).view(batch_size, -1)
+                )
+                det = torch.full(batch_size, abs(np.log(self.negative_slope)))
+                log_det_acc += non_activated_n * det
         return x2, log_det_acc
 
     def reverse(self, y):
