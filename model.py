@@ -110,7 +110,7 @@ class InvLeakyReLU(nn.Module):
         return x2, log_det_acc
 
     def reverse(self, y):
-        return nn.functional.leaky_relu(y, 1/self.negative_slope)
+        return nn.functional.leaky_relu(y, 1 / self.negative_slope)
 
 
 class FlowStep(nn.Module):
@@ -136,10 +136,25 @@ class FlowStep(nn.Module):
         else:
             return x, log_det_acc
 
-    def reverse(self, y):
-        y = self.leaky_relu.reverse(y)
+    def reverse(self, y, activate=True):
+        if activate:
+            y = self.leaky_relu.reverse(y)
         y = self.inv_1x1_conv.reverse(y)
         return self.actnorm.reverse(y)
+
+
+def squeeze(x):
+    batch_size, n_channels, n_features = x.shape
+    x_squeezed = x.view(batch_size, n_channels, n_features // 2, 2)
+    x_squeezed = torch.transpose(x_squeezed, 2, 3)
+    return x_squeezed.view(batch_size, 2 * n_channels, -1)
+
+
+def unsqueeze(y):
+    batch_size, n_channels, n_features = y.shape
+    y_unsqueezed = y.view(batch_size, n_channels // 2, 2, n_features)
+    y_unsqueezed = y_unsqueezed.transpose(2, 3)
+    return y_unsqueezed.contiguous().view(batch_size, n_channels // 2, -1)
 
 
 class FlowScale(nn.Module):
@@ -152,22 +167,37 @@ class FlowScale(nn.Module):
     def __init__(self, in_channels, k, epsilon=1e-6, negative_slope=0.01):
         super(FlowScale, self).__init__()
         self.flow_steps = nn.ModuleList(
-            [FlowStep(2*in_channels, epsilon, negative_slope) for _ in range(k)]
+            [FlowStep(2 * in_channels, epsilon, negative_slope) for _ in
+             range(k)]
         )
 
     def forward(self, x, log_det_acc=None, split=True):
-        batch_size, n_channels, n_features = x.shape
-        x_squeezed = x.view(batch_size, n_channels, n_features // 2, 2)
-        x_squeezed = torch.transpose(x_squeezed, 2, 3)
-        x = x_squeezed.view(batch_size, 2 * n_channels, -1)
-
-        for flow_step in self.flow_steps:
+        x = squeeze(x)
+        for flow_step in self.flow_steps[:-1]:
             x, log_det_acc = flow_step(x, log_det_acc)
+        x, log_det_acc = self.flow_steps[-1](x, log_det_acc, activate=False)
 
+        if split:
+            x = squeeze(x)
+            x_new, z = x[:, ::2, :], x[:, 1::2, :]
+            rolled_x_new = torch.roll(x_new, 1, 2)
+            rolled_x_new[:, :, 0] = x_new[:, :, 0]
+            z += (rolled_x_new + x_new) / 2
+            return x_new, z, log_det_acc
+        else:
+            return x, None, log_det_acc
 
-
-
-
-
-
-
+    def reverse(self, y, z):
+        if z is not None:
+            rolled_y = torch.roll(y, 1, 2)
+            rolled_y[:, :, 0] = y[:, :, 0]
+            z -= (rolled_y + y) / 2
+            batch_size, n_channels, n_features = y.shape
+            y_new = torch.zeros(batch_size, 2 * n_channels, n_features)
+            y_new[:, ::2, :] = y
+            y_new[:, 1::2, :] = z
+            y = unsqueeze(y_new)
+        y = self.flow_steps[-1].reverse(y, activate=False)
+        for flow_step in self.flow_steps[len(self.flow_steps)-2::-1]:
+            y = flow_step.reverse(y)
+        return unsqueeze(y)
