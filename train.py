@@ -28,27 +28,35 @@ class ECGDatasetFromFile(Dataset):
 
 
 def flow_loss(z, log_dets, distribution):
-    return -(distribution.log_prob(z).sum(dim=1) + log_dets).mean()
+    return -(distribution.log_prob(z).sum(dim=1)).mean() - log_dets.mean()
 
 
 def train(model, d_loader, optimizer, n_epochs, device):
     losses = []
     distribution = Normal(torch.tensor([0.0]), torch.tensor([1.0]))
+    first_batch = True
     for epoch in range(n_epochs):
         epoch_losses = []
         for batch, _ in d_loader:
             model.train()
             optimizer.zero_grad()
             batch = batch.to(device)
+            if first_batch:
+                with torch.no_grad():
+                    model(batch)
+                    first_batch = False
+                    continue
             z, log_dets = model(batch)
             loss = flow_loss(z, log_dets, distribution)
-            losses.append(loss.item())
             epoch_losses.append(loss.item())
             loss.backward()
             optimizer.step()
-        if epoch % 50 == 0:
-            print(f'Epoch: {epoch}, train loss:',
-                  f'{sum(epoch_losses) / len(epoch_losses)}')
+        if epoch % 20 == 0:
+            print(
+                f'Epoch: {epoch}, train loss:',
+                f'{sum(epoch_losses) / len(epoch_losses)}'
+            )
+        losses.append(sum(epoch_losses) / len(epoch_losses))
 
     return model, losses
 
@@ -59,18 +67,18 @@ def main():
         device = torch.device("cuda")
     in_channels = 8
     n_scales = 2
-    n_steps = 4
+    n_steps = 8
 
     model = ECGNormFlow(
-        in_channels, n_scales, n_steps, negative_slope=0.9
+        in_channels, n_scales, n_steps, negative_slope=0.01
     ).to(device)
 
-    batch_size = 10
-    lr = 1e-5
-    epochs = 1000
+    batch_size = 16
+    lr = 1e-3
+    epochs = 100000
     optimizer = Adam(model.parameters(), lr=lr)
 
-    dataset = ECGDatasetFromFile('./medians-labels.csv', '../medians', 10)
+    dataset = ECGDatasetFromFile('./medians-labels.csv', '../medians', 32)
     dl = DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     model, losses = train(model, dl, optimizer, epochs, device)

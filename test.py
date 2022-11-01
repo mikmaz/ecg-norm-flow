@@ -2,19 +2,19 @@ import pytest as pytest
 import torch
 import model
 import numpy as np
-from torch import nn
 from train import ECGDatasetFromFile
 from torch.utils.data import DataLoader
 import itertools
 from torch.distributions.normal import Normal
-
+from functorch import jacrev, vmap
 
 BATCH_SIZE = 2
 N_SCALES = 2
 
 
 def simple_tensor():
-    return torch.tensor([[[i for i in range(16)]]], dtype=torch.float64)
+    return torch.tensor([[[i for i in range(16)], [-2 * i for i in range(16)]]],
+                        dtype=torch.float64)
 
 
 def load_ecg(f_path):
@@ -41,11 +41,11 @@ def produce_sample_ecgs(
 
 
 SAMPLE_ECGS = produce_sample_ecgs(
-    './medians-labels.csv',
-    '../medians',
-    BATCH_SIZE,
-    './140001-med.asc',
-    './301735.asc'
+    annotations_file='./medians-labels.csv',
+    ecgs_dir='../medians',
+    batch_size=BATCH_SIZE,
+    ecg_path1='./140001-med.asc',
+    ecg_path2='./301735.asc'
 )
 
 N_STEPS = [2 ** i for i in range(1, 5)]
@@ -56,6 +56,11 @@ NEGATIVE_SLOPES = [0.01, 0.1, 0.5, 0.9]
 @pytest.fixture(params=SAMPLE_ECGS)
 def sample_ecgs(request):
     return request.param
+
+
+@pytest.fixture(params=SAMPLE_ECGS)
+def sample_ecg(request):
+    return request.param[0]
 
 
 @pytest.fixture(params=N_STEPS)
@@ -73,116 +78,151 @@ def flow_n_scales():
     return N_SCALES
 
 
-def test_change_of_variables(sample_ecgs, flow_n_steps, flow_n_scales,
-                             negative_slope):
-    sample_ecg = sample_ecgs[0]
-    norm_flow = model.ECGNormFlow(sample_ecg.shape[1], flow_n_scales,
-                                  flow_n_steps,
-                                  negative_slope=negative_slope)
-    z, log_dets = norm_flow(sample_ecg)
-    distribution = Normal(torch.tensor([0.0]), torch.tensor([1.0]))
-    z_probabilities = torch.exp(distribution.log_prob(z).sum(dim=1))
-    probabilities = z_probabilities * torch.exp(log_dets)
-    assert torch.all(probabilities <= 1.)
+@pytest.fixture
+def normal_dist():
+    return Normal(torch.tensor([60.0]), torch.tensor([130.0]))
+
+
+def init_actnorm(net, sample):
+    with torch.no_grad():
+        net.forward(sample)
+
+
+def jacobian_log_det(net, samples, params=None, split=False):
+    if params is None:
+        params = []
+    batch_size, n_channels, n_features = samples.shape
+    n = n_channels * n_features
+    args = [samples.unsqueeze(1), False] + params
+    in_dims = tuple([0, *[None for _ in range(len(args) - 1)]])
+    jacobians = vmap(jacrev(net.forward), in_dims=in_dims)(*args)
+
+    if split:
+        jac_x = torch.reshape(jacobians[0], (batch_size, n // 2, n))
+        jac_z = torch.reshape(jacobians[1], (batch_size, n // 2, n))
+        jac = torch.cat([jac_x, jac_z], dim=1)
+        _, _, net_log_det = net.forward(samples)
+    else:
+        jac = torch.reshape(jacobians, (batch_size, n, n))
+        args = [samples, True] + params
+        _, net_log_det = net.forward(*args)
+
+    _, jac_log_det = torch.linalg.slogdet(jac)
+    net_log_det = net_log_det.double()
+    assert torch.allclose(net_log_det, jac_log_det)
+
+
+class TestLogDet:
+    def test_actnorm(self, sample_ecgs):
+        actnorm = model.Actnorm(sample_ecgs[0].shape[1])
+        init_actnorm(actnorm, sample_ecgs[0])
+        jacobian_log_det(actnorm, sample_ecgs[1])
+
+    def test_inv_conv1d(self, sample_ecg):
+        inv_conv1d = model.InvConv1d(sample_ecg.shape[1])
+        jacobian_log_det(inv_conv1d, sample_ecg)
+
+    def test_inv_leaky_relu(self, sample_ecg, negative_slope):
+        inv_leaky_relu = model.InvLeakyReLU(negative_slope)
+        jacobian_log_det(inv_leaky_relu, sample_ecg)
+
+    def test_flow_step(self, sample_ecgs, negative_slope):
+        flow_step = model.FlowStep(
+            sample_ecgs[0].shape[1],
+            negative_slope=negative_slope
+        )
+        init_actnorm(flow_step, sample_ecgs[0])
+        jacobian_log_det(flow_step, sample_ecgs[1])
+
+    def test_flow_step_no_activ(self, sample_ecgs):
+        flow_step = model.FlowStep(sample_ecgs[0].shape[1])
+        init_actnorm(flow_step, sample_ecgs[0])
+        jacobian_log_det(flow_step, sample_ecgs[1], params=[False])
+
+    def test_flow_scale_split(self, sample_ecgs, flow_n_steps, negative_slope):
+        flow_scale = model.FlowScale(sample_ecgs[0].shape[1], flow_n_steps,
+                                     negative_slope=negative_slope)
+        init_actnorm(flow_scale, sample_ecgs[0])
+        jacobian_log_det(flow_scale, sample_ecgs[1], split=True)
+
+    def test_flow_scale_no_split(self, sample_ecgs, flow_n_steps):
+        flow_scale = model.FlowScale(sample_ecgs[0].shape[1], flow_n_steps)
+        init_actnorm(flow_scale, sample_ecgs[0])
+        jacobian_log_det(flow_scale, sample_ecgs[1], params=[False])
+
+    def test_flow(self, sample_ecgs, flow_n_steps):
+        # torch.set_default_dtype(torch.float64)
+        norm_flow = model.ECGNormFlow(sample_ecgs[0].shape[1], N_SCALES,
+                                      flow_n_steps)
+        init_actnorm(norm_flow, sample_ecgs[0])
+        jacobian_log_det(norm_flow, sample_ecgs[1])
 
 
 class TestInverse:
     def test_actnorm(self, sample_ecgs):
-        sample_ecg = sample_ecgs[0]
-        actnorm = model.Actnorm(sample_ecg.shape[1])
-        y, _ = actnorm(sample_ecg)
-        assert torch.allclose(sample_ecg, actnorm.reverse(y))
+        actnorm = model.Actnorm(sample_ecgs[0].shape[1])
+        init_actnorm(actnorm, sample_ecgs[0])
+        y = actnorm(sample_ecgs[1], w_log_det=False)
+        assert torch.allclose(actnorm.reverse(y), sample_ecgs[1])
 
-    def test_actnorm_after_init(self, sample_ecgs):
-        sample_ecg, sample_ecg2 = sample_ecgs
-        actnorm = model.Actnorm(sample_ecg.shape[1])
-        actnorm(sample_ecg)
-        y, _ = actnorm(sample_ecg2)
-        assert torch.allclose(sample_ecg2, actnorm.reverse(y))
-
-    def test_inv_conv1d(self, sample_ecgs):
-        sample_ecg = sample_ecgs[0]
+    def test_inv_conv1d(self, sample_ecg):
         inv_conv1d = model.InvConv1d(sample_ecg.shape[1])
-        y, _ = inv_conv1d(sample_ecg)
-        assert torch.allclose(sample_ecg, inv_conv1d.reverse(y))
+        y = inv_conv1d(sample_ecg, w_log_det=False)
+        assert torch.allclose(inv_conv1d.reverse(y), sample_ecg)
 
-    def test_inv_leaky_relu(self, sample_ecgs, negative_slope):
-        sample_ecg = sample_ecgs[0]
+    def test_inv_leaky_relu(self, sample_ecg, negative_slope):
         inv_leaky_relu = model.InvLeakyReLU(negative_slope)
-        y, _ = inv_leaky_relu(sample_ecg)
-        assert torch.allclose(sample_ecg, inv_leaky_relu.reverse(y))
+        y = inv_leaky_relu(sample_ecg, w_log_det=False)
+        assert torch.allclose(inv_leaky_relu.reverse(y), sample_ecg)
 
     def test_flow_step(self, sample_ecgs, negative_slope):
-        sample_ecg = sample_ecgs[0]
-        flow_step = model.FlowStep(sample_ecg.shape[1],
-                                   negative_slope=negative_slope)
-        y, _ = flow_step(sample_ecg)
-        assert torch.allclose(sample_ecg, flow_step.reverse(y))
+        flow_step = model.FlowStep(
+            sample_ecgs[0].shape[1],
+            negative_slope=negative_slope
+        )
+        init_actnorm(flow_step, sample_ecgs[0])
+        y = flow_step(sample_ecgs[1], w_log_det=False)
+        assert torch.allclose(flow_step.reverse(y), sample_ecgs[1])
+
+    def test_flow_step_no_activ(self, sample_ecgs):
+        flow_step = model.FlowStep(sample_ecgs[0].shape[1])
+        init_actnorm(flow_step, sample_ecgs[0])
+        sample_ecg2 = sample_ecgs[1]
+        y = flow_step(sample_ecg2, w_log_det=False, activate=False)
+        assert torch.allclose(flow_step.reverse(y, activate=False), sample_ecg2)
 
     def test_flow_scale_split(self, sample_ecgs, flow_n_steps, negative_slope):
-        sample_ecg = sample_ecgs[0]
-        flow_scale = model.FlowScale(sample_ecg.shape[1], flow_n_steps,
-                                     negative_slope=negative_slope)
-        y, z, _ = flow_scale(sample_ecg)
-        assert torch.allclose(sample_ecg, flow_scale.reverse(y, z))
-
-    def test_flow_scale_no_split(self, sample_ecgs, flow_n_steps,
-                                 negative_slope):
-        sample_ecg = sample_ecgs[0]
-        flow_scale = model.FlowScale(sample_ecg.shape[1], flow_n_steps,
-                                     negative_slope=negative_slope)
-        y, _, _ = flow_scale(sample_ecg, split=False)
-        assert torch.allclose(sample_ecg, flow_scale.reverse(y, None))
-
-    def test_inner_flow(self, sample_ecgs, flow_n_scales, flow_n_steps,
-                        negative_slope):
-        # Initialization
-        sample_ecg = sample_ecgs[0]
-        in_channels = sample_ecg.shape[1]
-        batch_size = sample_ecg.shape[0]
-        flow_scales = nn.ModuleList(
-            [model.FlowScale(2 ** i * in_channels, flow_n_steps,
-                             negative_slope=negative_slope)
-             for i in range(flow_n_scales)]
+        flow_scale = model.FlowScale(
+            sample_ecgs[0].shape[1],
+            flow_n_steps,
+            negative_slope=negative_slope
         )
-        x = sample_ecg.clone()
+        init_actnorm(flow_scale, sample_ecgs[0])
+        y, z = flow_scale(sample_ecgs[1], w_log_det=False)
+        assert torch.allclose(flow_scale.reverse(y, z), sample_ecgs[1])
 
-        # Forward
-        zs_f = []
-        zs_f_clone = []
-        for flow_scale in flow_scales[:-1]:
-            x, z, _ = flow_scale(x)
-            zs_f.append(z)
-            zs_f_clone.append(z.clone())
+    def test_flow_scale_no_split(
+            self, sample_ecgs, flow_n_steps, negative_slope
+    ):
+        flow_scale = model.FlowScale(
+            sample_ecgs[0].shape[1],
+            flow_n_steps,
+            negative_slope=negative_slope
+        )
+        init_actnorm(flow_scale, sample_ecgs[0])
+        y = flow_scale(sample_ecgs[1], w_log_det=False, split=False)
+        assert torch.allclose(flow_scale.reverse(y, None), sample_ecgs[1])
 
-        x_before_non_split_scale = x.clone()
-        x, _, _ = flow_scales[-1](x, None, split=False)
-        x_after_non_split_scale = x.clone()
-
-        zs_f.append(x)
-        y = torch.cat([z.flatten(start_dim=1) for z in zs_f], dim=1)
-
-        # Reverse
-        zs_r = []
-        for i in range(1, flow_n_scales):
-            z, y = y.chunk(2, dim=1)
-            z = z.view(batch_size, 2 ** i * in_channels, -1)
-            assert torch.allclose(zs_f_clone[i - 1], z)
-            zs_r.append(z)
-        y = y.view(batch_size, 2 ** flow_n_scales * in_channels, -1)
-        assert torch.allclose(x_after_non_split_scale, y)
-        y = flow_scales[-1].reverse(y, None)
-        assert torch.allclose(x_before_non_split_scale, y)
-        for i in range(-2, -flow_n_scales - 1, -1):
-            y = flow_scales[i].reverse(y, zs_r[i + 1])
-
-        assert torch.allclose(sample_ecg, y)
-
-    def test_flow(self, sample_ecgs, flow_n_steps, flow_n_scales,
-                  negative_slope):
-        sample_ecg = sample_ecgs[0]
-        norm_flow = model.ECGNormFlow(sample_ecg.shape[1], flow_n_scales,
-                                      flow_n_steps,
-                                      negative_slope=negative_slope)
-        z, _ = norm_flow(sample_ecg, False)
-        assert torch.allclose(sample_ecg, norm_flow.reverse(z))
+    def test_flow(
+            self, sample_ecgs, flow_n_steps, flow_n_scales, negative_slope
+    ):
+        # torch.set_default_dtype(torch.float64)
+        norm_flow = model.ECGNormFlow(
+            sample_ecgs[0].shape[1],
+            flow_n_scales,
+            flow_n_steps,
+            negative_slope=negative_slope
+        )
+        init_actnorm(norm_flow, sample_ecgs[0])
+        z = norm_flow(sample_ecgs[1], w_log_det=False)
+        assert torch.allclose(norm_flow.reverse(z), sample_ecgs[1])
