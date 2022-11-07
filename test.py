@@ -8,7 +8,7 @@ import itertools
 from torch.distributions.normal import Normal
 from functorch import jacrev, vmap
 
-BATCH_SIZE = 2
+BATCH_SIZE = 4
 N_SCALES = 2
 
 
@@ -30,19 +30,19 @@ def produce_sample_ecgs(
         ecg_path1,
         ecg_path2
 ):
-    dataset = ECGDatasetFromFile(annotations_file, ecgs_dir)
+    dataset = ECGDatasetFromFile(annotations_file, ecgs_dir, N_SCALES)
     dl = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     return [(simple_tensor(), -simple_tensor()),
             (load_ecg(ecg_path1), load_ecg(ecg_path2)),
             (
-                next(itertools.islice(dl, 0, None))[0],
-                next(itertools.islice(dl, 1, None))[0]
+                next(itertools.islice(dl, 0, None)),
+                next(itertools.islice(dl, 1, None))
             )]
 
 
 SAMPLE_ECGS = produce_sample_ecgs(
     annotations_file='./medians-labels.csv',
-    ecgs_dir='../medians',
+    ecgs_dir='../medians-20k-norm',
     batch_size=BATCH_SIZE,
     ecg_path1='./140001-med.asc',
     ecg_path2='./301735.asc'
@@ -216,7 +216,6 @@ class TestInverse:
     def test_flow(
             self, sample_ecgs, flow_n_steps, flow_n_scales, negative_slope
     ):
-        # torch.set_default_dtype(torch.float64)
         norm_flow = model.ECGNormFlow(
             sample_ecgs[0].shape[1],
             flow_n_scales,
