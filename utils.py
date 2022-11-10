@@ -27,9 +27,21 @@ def dataset_mean_std(dl, n_channels):
     return mean, std
 
 
-def sample_from_model(net, distribution, sample_size, epoch, device):
-    z = distribution.sample([sample_size]).flatten().unsqueeze(0).double().to(device)
-    with torch.no_grad():
-        x = net.reverse(z)
-    x = x.cpu().detach().numpy().reshape((8, -1)).transpose(1, 0)
-    np.savetxt(f'./training-samples/{epoch}.asc', x, delimiter=' ')
+def sample_from_model(
+        net,
+        distribution,
+        sample_size,
+        epoch,
+        device,
+        n_channels,
+        n_samples,
+        stats_path
+):
+    for i in range(n_samples):
+        z = distribution.sample([sample_size]).flatten().unsqueeze(0)
+        with torch.no_grad():
+            x = net.reverse(z.double().to(device))
+        x = x.cpu().detach().numpy().reshape((n_channels, -1)).transpose(1, 0)
+        np.savetxt(
+            f'{stats_path}/training-samples/{epoch}-{i}.asc', x, delimiter=' '
+        )

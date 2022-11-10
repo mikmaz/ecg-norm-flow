@@ -190,7 +190,6 @@ class FlowScale(nn.Module):
             log_det_acc = torch.zeros(x.shape[0], device=self.device)
             for flow_step in self.flow_steps[:-1]:
                 x, log_det = flow_step(x, self.activate)
-                #print('self device', self.device)
                 log_det_acc += log_det.to(self.device)
             x, log_det = self.flow_steps[-1](x, activate=False)
             log_det_acc += log_det
