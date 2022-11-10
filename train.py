@@ -46,7 +46,7 @@ class ECGDatasetFromFile(Dataset):
 
 
 def flow_loss(z, log_dets, distribution):
-    return -(distribution.log_prob(z).sum(dim=1)).mean() - log_dets.mean()
+    return -(distribution.log_prob(z.to('cpu')).sum(dim=1)).mean() - log_dets.mean().to('cpu')
 
 
 def train(model, d_loader, optimizer, n_epochs, device):
@@ -76,12 +76,12 @@ def train(model, d_loader, optimizer, n_epochs, device):
                 loss.backward()
                 optimizer.step()
 
-            if epoch % 10 == 0:
+            if (epoch + 1) % (n_epochs // 4) == 0:
                 utils.sample_from_model(
-                    model, distribution, n_channels * n_pixels, epoch
+                    model, distribution, n_channels * n_pixels, epoch, device
                 )
 
-            if epoch % 20 == 0:
+            if (epoch + 1) % (n_epochs // 5) == 0:
                 torch.save(
                     model.state_dict(), f"checkpoint/model_{epoch}.pt"
                 )
@@ -93,10 +93,10 @@ def train(model, d_loader, optimizer, n_epochs, device):
             if epoch % 1 == 0:
                 border = "=" * 50
                 clear_border = _term_move_up() + "\r" + " " * len(border) + "\r"
-                pbar.write(clear_border + f'Epoch: {epoch}, train loss: ' +
-                           f'{sum(epoch_losses) / len(epoch_losses)}')
-                pbar.write(border)
-                pbar.update()
+                print(f'Epoch: {epoch}, train loss: ' +
+                      f'{sum(epoch_losses) / len(epoch_losses)}')
+                # pbar.write(border)
+                # pbar.update()
                 with open('./losses.txt', 'a+') as f:
                     f.write(f'{sum(epoch_losses) / len(epoch_losses)}\n')
             losses.append(sum(epoch_losses) / len(epoch_losses))
@@ -108,16 +108,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
     in_channels = 8
-    n_scales = 3
-    n_steps = 2
+    n_scales = 4
+    n_steps = 4
 
     model = ECGNormFlow(
-        in_channels, n_scales, n_steps, negative_slope=0.5
+        in_channels, n_scales, n_steps, negative_slope=0.1, device=device
     ).to(device)
 
-    batch_size = 64
-    lr = 1e-3
-    epochs = 5000
+    batch_size = 512
+    lr = 1e-4
+    epochs = 5
     optimizer = Adam(model.parameters(), lr=lr)
     medians_mean = torch.tensor([
         51.4309, 65.1785, -12.0250, 54.8314,
@@ -134,7 +134,7 @@ def main():
         mean=medians_mean,
         std=medians_std
     )
-    dl = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    dl = DataLoader(dataset, batch_size=batch_size, num_workers=4, shuffle=True)
 
     model, losses = train(model, dl, optimizer, epochs, device)
     torch.save(

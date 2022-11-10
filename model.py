@@ -2,6 +2,7 @@ import torch
 import scipy
 from torch import nn
 import numpy as np
+from scipy import linalg
 
 
 def log_abs(x):
@@ -47,8 +48,8 @@ class InvConv1d(nn.Module):
     # TODO add constants
     def __init__(self, in_channels):
         super(InvConv1d, self).__init__()
-        q = scipy.linalg.qr(np.random.randn(in_channels, in_channels))[0]
-        p, l, u = scipy.linalg.lu(q)
+        q = linalg.qr(np.random.randn(in_channels, in_channels))[0]
+        p, l, u = linalg.lu(q)
 
         self.register_buffer("p", torch.from_numpy(p))
         self.u_tri = nn.Parameter(torch.from_numpy(u))
@@ -60,7 +61,7 @@ class InvConv1d(nn.Module):
         self.log_abs_s = nn.Parameter(log_abs(s))
 
         w_shape = (in_channels, in_channels)
-        self.register_buffer('identity', torch.eye(in_channels))
+        self.register_buffer('identity', torch.eye(in_channels).double())
         self.register_buffer('l_mask', torch.tril(torch.ones(w_shape), -1))
         self.register_buffer('u_mask', self.l_mask.T)
 
@@ -81,10 +82,8 @@ class InvConv1d(nn.Module):
 
     def reverse(self, y):
         l_tri, u_tri = self.reconstruct_matrices()
-        l_tri_inv = torch.linalg.solve_triangular(l_tri, self.identity,
-                                                  upper=False)
-        u_tri_inv = torch.linalg.solve_triangular(u_tri, self.identity,
-                                                  upper=True)
+        l_tri_inv = torch.linalg.solve(l_tri, self.identity)
+        u_tri_inv = torch.linalg.solve(u_tri, self.identity)
         w = (u_tri_inv @ l_tri_inv @ self.p.T).unsqueeze(2)
         return nn.functional.conv1d(y, w)
 
@@ -175,7 +174,7 @@ class FlowScale(nn.Module):
     negative_slope: float
 
     def __init__(self, in_channels, n_steps, epsilon=1e-6, negative_slope=0.01,
-                 activate=True):
+                 activate=True, device=None):
         super(FlowScale, self).__init__()
         self.flow_steps = nn.ModuleList(
             [FlowStep(2 * in_channels, epsilon, negative_slope) for _ in
@@ -183,14 +182,16 @@ class FlowScale(nn.Module):
         )
         self.inv_conv1d = InvConv1d(2 * in_channels)
         self.activate = activate
+        self.device = device
 
     def forward(self, x, w_log_det=True, split=True):
         x = squeeze(x)
         if w_log_det:
-            log_det_acc = torch.zeros(x.shape[0])
+            log_det_acc = torch.zeros(x.shape[0], device=self.device)
             for flow_step in self.flow_steps[:-1]:
                 x, log_det = flow_step(x, self.activate)
-                log_det_acc += log_det
+                #print('self device', self.device)
+                log_det_acc += log_det.to(self.device)
             x, log_det = self.flow_steps[-1](x, activate=False)
             log_det_acc += log_det
         else:
@@ -235,20 +236,21 @@ class FlowScale(nn.Module):
 
 class ECGNormFlow(nn.Module):
     def __init__(self, in_channels, n_scales, n_steps, epsilon=1e-6,
-                 negative_slope=0.01, activate=True):
+                 negative_slope=0.01, activate=True, device=None):
         super(ECGNormFlow, self).__init__()
         self.in_channels = in_channels
         self.flow_scales = nn.ModuleList(
-            [FlowScale(2**i * in_channels, n_steps, epsilon, negative_slope,
-                       activate)
+            [FlowScale(2 ** i * in_channels, n_steps, epsilon, negative_slope,
+                       activate, device)
              for i in range(n_scales)]
         )
         self.n_scales = n_scales
         self.activate = activate
+        self.device = device
 
     def forward(self, x, w_log_det=True):
         if w_log_det:
-            log_det_acc = torch.zeros(x.shape[0])
+            log_det_acc = torch.zeros(x.shape[0], device=self.device)
             zs = []
             for flow_scale in self.flow_scales[:-1]:
                 x, z, log_det = flow_scale(x)
@@ -272,9 +274,9 @@ class ECGNormFlow(nn.Module):
         batch_size = y.shape[0]
         for i in range(1, self.n_scales):
             z, y = y.chunk(2, dim=1)
-            z = z.view(batch_size, 2**i * self.in_channels, -1)
+            z = z.view(batch_size, 2 ** i * self.in_channels, -1)
             zs.append(z)
-        y = y.view(batch_size, 2**self.n_scales * self.in_channels, -1)
+        y = y.view(batch_size, 2 ** self.n_scales * self.in_channels, -1)
         y = self.flow_scales[-1].reverse(y, None)
         for i in range(-2, -self.n_scales - 1, -1):
             y = self.flow_scales[i].reverse(y, zs[i + 1])
