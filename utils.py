@@ -1,6 +1,7 @@
 import torch
 from tqdm import tqdm
 import numpy as np
+import pandas as pd
 
 
 def dataset_mean_std(dl, n_channels):
@@ -25,6 +26,13 @@ def dataset_mean_std(dl, n_channels):
     std = torch.sqrt(std / n_pixels)
 
     return mean, std
+
+
+def train_val_split(annot_path, val_frac):
+    annot_df = pd.read_csv(annot_path)
+    val_annot = annot_df.sample(frac=val_frac)
+    train_annot = annot_df.drop(val_annot.index)
+    return train_annot.reset_index(drop=True), val_annot.reset_index(drop=True)
 
 
 def sample_from_model(
