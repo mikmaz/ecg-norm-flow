@@ -183,6 +183,7 @@ class FlowScale(nn.Module):
         self.inv_conv1d = InvConv1d(2 * in_channels)
         self.activate = activate
         self.device = device
+        self.n_steps = n_steps
 
     def forward(self, x, w_log_det=True, split=True):
         x = squeeze(x)
@@ -228,8 +229,8 @@ class FlowScale(nn.Module):
             y_new[:, 1::2, :] = z
             y = unsqueeze(y_new)
         y = self.flow_steps[-1].reverse(y, activate=False)
-        for flow_step in self.flow_steps[len(self.flow_steps) - 2::-1]:
-            y = flow_step.reverse(y, self.activate)
+        for i in range(-2, -self.n_steps - 1, -1):
+            y = self.flow_steps[i].reverse(y, self.activate)
         return unsqueeze(y)
 
 
