@@ -7,48 +7,36 @@ from torch.utils.data import DataLoader
 import itertools
 from torch.distributions.normal import Normal
 from functorch import jacrev, vmap
+import pandas as pd
+import utils
 
-BATCH_SIZE = 4
-N_SCALES = 2
-
-
-def simple_tensor():
-    return torch.tensor([[[i for i in range(16)], [-2 * i for i in range(16)]]],
-                        dtype=torch.float64)
-
-
-def load_ecg(f_path):
-    return torch.tensor(
-        np.loadtxt(f_path, delimiter=' ').transpose((1, 0))
-    ).unsqueeze(0)
+BATCH_SIZE = 512
+N_SCALES = 5
 
 
 def produce_sample_ecgs(
         annotations_file,
         ecgs_dir,
         batch_size,
-        ecg_path1,
-        ecg_path2
 ):
-    dataset = ECGDatasetFromFile(annotations_file, ecgs_dir, N_SCALES)
+    annot_df = pd.read_csv(annotations_file)
+    dataset = ECGDatasetFromFile(annot_df, ecgs_dir, n_scales=N_SCALES,
+                                 n_channels=8, mean=utils.medians_mean,
+                                 std=utils.medians_std)
     dl = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    return [(simple_tensor(), -simple_tensor()),
-            (load_ecg(ecg_path1), load_ecg(ecg_path2)),
-            (
-                next(itertools.islice(dl, 0, None)),
-                next(itertools.islice(dl, 1, None))
-            )]
+    return [(
+        next(itertools.islice(dl, 0, None)),
+        next(itertools.islice(dl, 1, None))
+    )]
 
 
 SAMPLE_ECGS = produce_sample_ecgs(
     annotations_file='./medians-labels.csv',
-    ecgs_dir='../medians-20k-norm',
+    ecgs_dir='../medians',
     batch_size=BATCH_SIZE,
-    ecg_path1='./140001-med.asc',
-    ecg_path2='./301735.asc'
 )
 
-N_STEPS = [2 ** i for i in range(1, 5)]
+N_STEPS = [2 ** i for i in range(0, 5)]
 
 NEGATIVE_SLOPES = [0.01, 0.1, 0.5, 0.9]
 
@@ -116,15 +104,15 @@ class TestLogDet:
     def test_actnorm(self, sample_ecgs):
         actnorm = model.Actnorm(sample_ecgs[0].shape[1])
         init_actnorm(actnorm, sample_ecgs[0])
-        jacobian_log_det(actnorm, sample_ecgs[1])
+        jacobian_log_det(actnorm, sample_ecgs[1][:4, :, :])
 
     def test_inv_conv1d(self, sample_ecg):
         inv_conv1d = model.InvConv1d(sample_ecg.shape[1])
-        jacobian_log_det(inv_conv1d, sample_ecg)
+        jacobian_log_det(inv_conv1d, sample_ecg[:4, :, :])
 
     def test_inv_leaky_relu(self, sample_ecg, negative_slope):
         inv_leaky_relu = model.InvLeakyReLU(negative_slope)
-        jacobian_log_det(inv_leaky_relu, sample_ecg)
+        jacobian_log_det(inv_leaky_relu, sample_ecg[:4, :, :])
 
     def test_flow_step(self, sample_ecgs, negative_slope):
         flow_step = model.FlowStep(
@@ -132,30 +120,29 @@ class TestLogDet:
             negative_slope=negative_slope
         )
         init_actnorm(flow_step, sample_ecgs[0])
-        jacobian_log_det(flow_step, sample_ecgs[1])
+        jacobian_log_det(flow_step, sample_ecgs[1][:4, :, :])
 
     def test_flow_step_no_activ(self, sample_ecgs):
         flow_step = model.FlowStep(sample_ecgs[0].shape[1])
         init_actnorm(flow_step, sample_ecgs[0])
-        jacobian_log_det(flow_step, sample_ecgs[1], params=[False])
+        jacobian_log_det(flow_step, sample_ecgs[1][:4, :, :], params=[False])
 
     def test_flow_scale_split(self, sample_ecgs, flow_n_steps, negative_slope):
         flow_scale = model.FlowScale(sample_ecgs[0].shape[1], flow_n_steps,
                                      negative_slope=negative_slope)
         init_actnorm(flow_scale, sample_ecgs[0])
-        jacobian_log_det(flow_scale, sample_ecgs[1], split=True)
+        jacobian_log_det(flow_scale, sample_ecgs[1][:4, :, :], split=True)
 
     def test_flow_scale_no_split(self, sample_ecgs, flow_n_steps):
         flow_scale = model.FlowScale(sample_ecgs[0].shape[1], flow_n_steps)
         init_actnorm(flow_scale, sample_ecgs[0])
-        jacobian_log_det(flow_scale, sample_ecgs[1], params=[False])
+        jacobian_log_det(flow_scale, sample_ecgs[1][:4, :, :], params=[False])
 
     def test_flow(self, sample_ecgs, flow_n_steps):
-        # torch.set_default_dtype(torch.float64)
         norm_flow = model.ECGNormFlow(sample_ecgs[0].shape[1], N_SCALES,
                                       flow_n_steps)
         init_actnorm(norm_flow, sample_ecgs[0])
-        jacobian_log_det(norm_flow, sample_ecgs[1])
+        jacobian_log_det(norm_flow, sample_ecgs[1][:4, :, :])
 
 
 class TestInverse:
