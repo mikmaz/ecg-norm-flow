@@ -11,20 +11,17 @@ def log_abs(x):
 
 class Actnorm(nn.Module):
     # TODO add constants
-    def __init__(self, in_channels, epsilon=1e-6):
+    def __init__(self, in_channels, signal_len, epsilon=1e-6):
         super(Actnorm, self).__init__()
-        self.scale = nn.Parameter(torch.ones(1, in_channels, 1))
-        self.bias = nn.Parameter(torch.zeros(1, in_channels, 1))
+        self.scale = nn.Parameter(torch.ones(1, in_channels, signal_len))
+        self.bias = nn.Parameter(torch.zeros(1, in_channels, signal_len))
         self.register_buffer("initialized", torch.tensor(0, dtype=torch.bool))
         self.register_buffer("epsilon", torch.tensor(epsilon))
 
     def init_weights(self, x):
         with torch.no_grad():
-            in_channels = x.shape[1]
-            x_channel_wise = x.transpose(0, 1).contiguous().view(in_channels,
-                                                                 -1)
-            mean = x_channel_wise.mean(1).view(1, in_channels, 1)
-            std = x_channel_wise.std(1).view(1, in_channels, 1)
+            mean = torch.mean(x, 0, keepdim=True)
+            std = torch.std(x, 0, keepdim=True)
             self.scale.copy_(1 / (std + self.epsilon.item()))
             self.bias.copy_(-mean)
             self.initialized.fill_(1)
@@ -34,8 +31,7 @@ class Actnorm(nn.Module):
             self.init_weights(x)
 
         if w_log_det:
-            batch_size = x.shape[2]
-            log_det = batch_size * torch.sum(log_abs(self.scale))
+            log_det = torch.sum(log_abs(self.scale))
             return self.scale * (x + self.bias), log_det
         else:
             return self.scale * (x + self.bias)
@@ -120,9 +116,10 @@ class FlowStep(nn.Module):
     epsilon: float
     negative_slope: float
 
-    def __init__(self, in_channels, epsilon=1e-6, negative_slope=0.01):
+    def __init__(self, in_channels, signal_len, epsilon=1e-6,
+                 negative_slope=0.01):
         super(FlowStep, self).__init__()
-        self.actnorm = Actnorm(in_channels, epsilon)
+        self.actnorm = Actnorm(in_channels, signal_len, epsilon)
         self.inv_1x1_conv = InvConv1d(in_channels)
         self.leaky_relu = InvLeakyReLU(negative_slope)
         self.in_channels = in_channels
@@ -173,22 +170,24 @@ class FlowScale(nn.Module):
     epsilon: float
     negative_slope: float
 
-    def __init__(self, in_channels, n_steps, epsilon=1e-6, negative_slope=0.01,
-                 activate=True, device=None, n_latent_steps=2):
+    def __init__(self, in_channels, signal_len, n_steps, scale_n, epsilon=1e-6,
+                 negative_slope=0.01, activate=True, device=None,
+                 n_latent_steps=2):
         super(FlowScale, self).__init__()
         self.flow_steps = nn.ModuleList(
-            [FlowStep(2 * in_channels, epsilon, negative_slope) for _ in
-             range(n_steps)]
+            [FlowStep(2 * in_channels, signal_len // 2, epsilon, negative_slope)
+             for _ in range(n_steps)]
         )
         self.latent_flow_steps = nn.ModuleList(
-            [FlowStep(2 * in_channels, epsilon, negative_slope) for _ in
-             range(n_latent_steps)]
+            [FlowStep(2 * in_channels, signal_len // 4, epsilon, negative_slope)
+             for _ in range(n_latent_steps)]
         )
         self.inv_conv1d = InvConv1d(2 * in_channels)
         self.activate = activate
         self.device = device
         self.n_steps = n_steps
         self.n_latent_steps = n_latent_steps
+        self.scale_n = scale_n
 
     def apply_flow_steps(self, x, steps, w_log_det=True):
         if w_log_det:
@@ -221,11 +220,15 @@ class FlowScale(nn.Module):
             x = self.apply_flow_steps(x, self.flow_steps, w_log_det)
 
         if split:
-            x = squeeze(x)
+            for _ in range(self.scale_n - 1):
+                x = unsqueeze(x)
             x_new, z = x[:, ::2, :], x[:, 1::2, :]
             rolled_x_new = torch.roll(x_new, -1, 2)
             rolled_x_new[:, :, -1] = x_new[:, :, -1]
             z -= (rolled_x_new + x_new) / 2
+            for _ in range(self.scale_n):
+                x_new = squeeze(x_new)
+                z = squeeze(z)
             if w_log_det:
                 z, log_det_acc2 = self.apply_flow_steps(
                     z, self.latent_flow_steps, w_log_det
@@ -245,6 +248,9 @@ class FlowScale(nn.Module):
             z = self.apply_flow_steps_reverse(
                 z, self.latent_flow_steps, self.n_latent_steps
             )
+            for _ in range(self.scale_n):
+                y = unsqueeze(y)
+                z = unsqueeze(z)
             rolled_y = torch.roll(y, -1, 2)
             rolled_y[:, :, -1] = y[:, :, -1]
             z += (rolled_y + y) / 2
@@ -253,7 +259,9 @@ class FlowScale(nn.Module):
                                 dtype=y.dtype, device=y.device)
             y_new[:, ::2, :] = y
             y_new[:, 1::2, :] = z
-            y = unsqueeze(y_new)
+            for _ in range(self.scale_n - 1):
+                y_new = squeeze(y_new)
+            y = y_new
         y = self.apply_flow_steps_reverse(
             y, self.flow_steps, self.n_steps
         )
@@ -261,14 +269,15 @@ class FlowScale(nn.Module):
 
 
 class ECGNormFlow(nn.Module):
-    def __init__(self, in_channels, n_scales, n_steps, epsilon=1e-6,
+    def __init__(self, in_channels, signal_len, n_scales, n_steps, epsilon=1e-6,
                  negative_slope=0.01, activate=True, device=None,
                  n_latent_steps=2):
         super(ECGNormFlow, self).__init__()
         self.in_channels = in_channels
         self.flow_scales = nn.ModuleList(
-            [FlowScale(2 ** i * in_channels, n_steps, epsilon, negative_slope,
-                       activate, device, n_latent_steps)
+            [FlowScale(2 ** i * in_channels, signal_len // 4 ** i, n_steps,
+                       i + 1, epsilon, negative_slope, activate, device,
+                       n_latent_steps)
              for i in range(n_scales)]
         )
         self.n_scales = n_scales
