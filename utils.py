@@ -3,6 +3,8 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import argparse
+from torch.utils.data import Dataset
+import os
 
 medians_mean = torch.tensor([
     51.4309, 65.1785, -12.0250, 54.8314,
@@ -81,9 +83,9 @@ def parse_args():
     )
     parser.add_argument(
         "--annot_path",
-        default="./annotations.csv",
         type=str,
-        help="path to the annotations file",
+        help="path to the annotations file, and when not specified, full" +
+             "dataset is loaded from pickle file",
     )
     parser.add_argument(
         "--stats_path",
@@ -95,6 +97,68 @@ def parse_args():
     parser.add_argument("path", type=str, help="path to ECGs' directory")
     parsed_args = parser.parse_args()
     return parsed_args
+
+
+class ECGDatasetFromFile(Dataset):
+    def __init__(self, annotations_df, ecgs_dir, n_scales, n_channels,
+                 size=-1, mean=None, std=None):
+        if size == -1:
+            self.ecg_labels = annotations_df
+        else:
+            self.ecg_labels = annotations_df.head(size).copy()
+        self.ecgs_dir = ecgs_dir
+        self.mean = mean
+        self.std = std
+        self.dim_red = 2 ** (2 * n_scales - 1)
+        self.n_channels = n_channels
+
+    def __len__(self):
+        return len(self.ecg_labels)
+
+    def __getitem__(self, idx):
+        ecg_path = os.path.join(self.ecgs_dir, self.ecg_labels.iloc[idx, 0])
+        ecg = np.loadtxt(ecg_path, delimiter=' ')
+        ecg = torch.tensor(ecg).transpose(1, 0)
+        if self.mean is not None:
+            ecg = ecg - self.mean
+        if self.std is not None:
+            ecg = ecg / self.std
+        if ecg.shape[1] % self.dim_red != 0:
+            trim_size = ecg.shape[1] % self.dim_red
+            trim_l = trim_size // 2
+            trim_r = ecg.shape[1] - (trim_size - trim_l)
+            ecg = ecg[:, trim_l:trim_r]
+        return ecg[:self.n_channels, :]
+
+
+class ECGDataset(Dataset):
+    def __init__(self, dataset_tensor, n_scales, n_channels, size=-1, mean=None,
+                 std=None):
+        if size == -1:
+            self.ecgs = dataset_tensor
+        else:
+            self.ecgs = dataset_tensor[:size, :, :]
+
+        if mean is not None:
+            self.ecgs = self.ecgs - mean
+        if std is not None:
+            self.ecgs = self.ecgs / std
+
+        dim_red = 2 ** (2 * n_scales - 1)
+        signal_len = self.ecgs.shape[2]
+        if signal_len % dim_red != 0:
+            trim_size = signal_len % dim_red
+            trim_l = trim_size // 2
+            trim_r = signal_len - (trim_size - trim_l)
+            self.ecgs = self.ecgs[:, :, trim_l:trim_r]
+
+        self.ecgs = self.ecgs[:, :n_channels, :]
+
+    def __len__(self):
+        return self.ecgs.shape[0]
+
+    def __getitem__(self, idx):
+        return self.ecgs[idx]
 
 
 def dataset_mean_std(dl, n_channels):
@@ -121,11 +185,57 @@ def dataset_mean_std(dl, n_channels):
     return mean, std
 
 
+def get_pickle_datasets(args):
+    dataset = torch.load(args.path)
+    print(dataset)
+    dataset_size = dataset.shape[0]
+    perm = torch.randperm(dataset.shape[0])
+    val_dataset_size = int(dataset_size * args.val_frac)
+    train_dataset = ECGDataset(
+        dataset[perm[val_dataset_size:]],
+        args.n_scales,
+        args.n_channels,
+        mean=None if args.no_normalization else medians_mean,
+        std=None if args.no_normalization else medians_std
+    )
+    val_dataset = ECGDataset(
+        dataset[perm[:val_dataset_size]],
+        args.n_scales,
+        args.n_channels,
+        mean=None if args.no_normalization else medians_mean,
+        std=None if args.no_normalization else medians_std
+    )
+    return train_dataset, val_dataset
+
+
 def train_val_split(annot_path, val_frac):
     annot_df = pd.read_csv(annot_path)
     val_annot = annot_df.sample(frac=val_frac)
     train_annot = annot_df.drop(val_annot.index)
     return train_annot.reset_index(drop=True), val_annot.reset_index(drop=True)
+
+
+def get_datasets_from_file(args):
+    train_annot, val_annot = train_val_split(
+        args.annot_path, args.val_frac
+    )
+    train_dataset = ECGDatasetFromFile(
+        train_annot,
+        args.path,
+        args.n_scales,
+        args.n_channels,
+        mean=None if args.no_normalization else medians_mean,
+        std=None if args.no_normalization else medians_std
+    )
+    val_dataset = ECGDatasetFromFile(
+        val_annot,
+        args.path,
+        args.n_scales,
+        args.n_channels,
+        mean=None if args.no_normalization else medians_mean,
+        std=None if args.no_normalization else medians_std
+    )
+    return train_dataset, val_dataset
 
 
 def sample_from_model(

@@ -2,7 +2,7 @@ import pytest as pytest
 import torch
 import model
 import numpy as np
-from train import ECGDatasetFromFile
+from utils import ECGDatasetFromFile
 from torch.utils.data import DataLoader
 import itertools
 from torch.distributions.normal import Normal
@@ -101,8 +101,10 @@ def jacobian_log_det(net, samples, params=None, split=False):
 
 
 class TestLogDet:
+    # TODO add bigger batch size test
     def test_actnorm(self, sample_ecgs):
-        actnorm = model.Actnorm(sample_ecgs[0].shape[1])
+        _, n_channels, signal_len = sample_ecgs[0].shape
+        actnorm = model.Actnorm(n_channels, signal_len)
         init_actnorm(actnorm, sample_ecgs[0])
         jacobian_log_det(actnorm, sample_ecgs[1][:4, :, :])
 
@@ -115,31 +117,39 @@ class TestLogDet:
         jacobian_log_det(inv_leaky_relu, sample_ecg[:4, :, :])
 
     def test_flow_step(self, sample_ecgs, negative_slope):
+        _, n_channels, signal_len = sample_ecgs[0].shape
         flow_step = model.FlowStep(
-            sample_ecgs[0].shape[1],
+            n_channels,
+            signal_len,
             negative_slope=negative_slope
         )
         init_actnorm(flow_step, sample_ecgs[0])
         jacobian_log_det(flow_step, sample_ecgs[1][:4, :, :])
 
     def test_flow_step_no_activ(self, sample_ecgs):
-        flow_step = model.FlowStep(sample_ecgs[0].shape[1])
+        _, n_channels, signal_len = sample_ecgs[0].shape
+        flow_step = model.FlowStep(n_channels, signal_len)
         init_actnorm(flow_step, sample_ecgs[0])
         jacobian_log_det(flow_step, sample_ecgs[1][:4, :, :], params=[False])
 
     def test_flow_scale_split(self, sample_ecgs, flow_n_steps, negative_slope):
-        flow_scale = model.FlowScale(sample_ecgs[0].shape[1], flow_n_steps,
+        _, n_channels, signal_len = sample_ecgs[0].shape
+        flow_scale = model.FlowScale(n_channels, signal_len, flow_n_steps,
+                                     scale_n=1,
                                      negative_slope=negative_slope)
         init_actnorm(flow_scale, sample_ecgs[0])
         jacobian_log_det(flow_scale, sample_ecgs[1][:4, :, :], split=True)
 
     def test_flow_scale_no_split(self, sample_ecgs, flow_n_steps):
-        flow_scale = model.FlowScale(sample_ecgs[0].shape[1], flow_n_steps)
+        _, n_channels, signal_len = sample_ecgs[0].shape
+        flow_scale = model.FlowScale(n_channels, signal_len, flow_n_steps,
+                                     scale_n=1)
         init_actnorm(flow_scale, sample_ecgs[0])
         jacobian_log_det(flow_scale, sample_ecgs[1][:4, :, :], params=[False])
 
     def test_flow(self, sample_ecgs, flow_n_steps):
-        norm_flow = model.ECGNormFlow(sample_ecgs[0].shape[1], N_SCALES,
+        _, n_channels, signal_len = sample_ecgs[0].shape
+        norm_flow = model.ECGNormFlow(n_channels, signal_len, N_SCALES,
                                       flow_n_steps)
         init_actnorm(norm_flow, sample_ecgs[0])
         jacobian_log_det(norm_flow, sample_ecgs[1][:4, :, :])
@@ -147,7 +157,8 @@ class TestLogDet:
 
 class TestInverse:
     def test_actnorm(self, sample_ecgs):
-        actnorm = model.Actnorm(sample_ecgs[0].shape[1])
+        _, n_channels, signal_len = sample_ecgs[0].shape
+        actnorm = model.Actnorm(n_channels, signal_len)
         init_actnorm(actnorm, sample_ecgs[0])
         y = actnorm(sample_ecgs[1], w_log_det=False)
         assert torch.allclose(actnorm.reverse(y), sample_ecgs[1])
@@ -163,8 +174,10 @@ class TestInverse:
         assert torch.allclose(inv_leaky_relu.reverse(y), sample_ecg)
 
     def test_flow_step(self, sample_ecgs, negative_slope):
+        _, n_channels, signal_len = sample_ecgs[0].shape
         flow_step = model.FlowStep(
-            sample_ecgs[0].shape[1],
+            n_channels,
+            signal_len,
             negative_slope=negative_slope
         )
         init_actnorm(flow_step, sample_ecgs[0])
@@ -172,16 +185,20 @@ class TestInverse:
         assert torch.allclose(flow_step.reverse(y), sample_ecgs[1])
 
     def test_flow_step_no_activ(self, sample_ecgs):
-        flow_step = model.FlowStep(sample_ecgs[0].shape[1])
+        _, n_channels, signal_len = sample_ecgs[0].shape
+        flow_step = model.FlowStep(n_channels, signal_len)
         init_actnorm(flow_step, sample_ecgs[0])
         sample_ecg2 = sample_ecgs[1]
         y = flow_step(sample_ecg2, w_log_det=False, activate=False)
         assert torch.allclose(flow_step.reverse(y, activate=False), sample_ecg2)
 
     def test_flow_scale_split(self, sample_ecgs, flow_n_steps, negative_slope):
+        _, n_channels, signal_len = sample_ecgs[0].shape
         flow_scale = model.FlowScale(
-            sample_ecgs[0].shape[1],
+            n_channels,
+            signal_len,
             flow_n_steps,
+            scale_n=1,
             negative_slope=negative_slope
         )
         init_actnorm(flow_scale, sample_ecgs[0])
@@ -191,9 +208,12 @@ class TestInverse:
     def test_flow_scale_no_split(
             self, sample_ecgs, flow_n_steps, negative_slope
     ):
+        _, n_channels, signal_len = sample_ecgs[0].shape
         flow_scale = model.FlowScale(
-            sample_ecgs[0].shape[1],
+            n_channels,
+            signal_len,
             flow_n_steps,
+            scale_n=1,
             negative_slope=negative_slope
         )
         init_actnorm(flow_scale, sample_ecgs[0])
@@ -203,8 +223,10 @@ class TestInverse:
     def test_flow(
             self, sample_ecgs, flow_n_steps, flow_n_scales, negative_slope
     ):
+        _, n_channels, signal_len = sample_ecgs[0].shape
         norm_flow = model.ECGNormFlow(
-            sample_ecgs[0].shape[1],
+            n_channels,
+            signal_len,
             flow_n_scales,
             flow_n_steps,
             negative_slope=negative_slope

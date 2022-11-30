@@ -11,38 +11,6 @@ from tqdm import tqdm
 import utils
 
 
-class ECGDatasetFromFile(Dataset):
-    def __init__(self, annotations_df, ecgs_dir, n_scales, n_channels,
-                 size=-1, mean=None, std=None):
-        if size == -1:
-            self.ecg_labels = annotations_df
-        else:
-            self.ecg_labels = annotations_df.head(size).copy()
-        self.ecgs_dir = ecgs_dir
-        self.mean = mean
-        self.std = std
-        self.dim_red = 2 ** (2 * n_scales - 1)
-        self.n_channels = n_channels
-
-    def __len__(self):
-        return len(self.ecg_labels)
-
-    def __getitem__(self, idx):
-        ecg_path = os.path.join(self.ecgs_dir, self.ecg_labels.iloc[idx, 0])
-        ecg = np.loadtxt(ecg_path, delimiter=' ')
-        ecg = torch.tensor(ecg).transpose(1, 0)
-        if self.mean is not None:
-            ecg = ecg - self.mean
-        if self.std is not None:
-            ecg = ecg / self.std
-        if ecg.shape[1] % self.dim_red != 0:
-            trim_size = ecg.shape[1] % self.dim_red
-            trim_l = trim_size // 2
-            trim_r = ecg.shape[1] - (trim_size - trim_l)
-            ecg = ecg[:, trim_l:trim_r]
-        return ecg[:self.n_channels, :]
-
-
 def flow_loss(z, log_dets, distribution):
     mean_log_proba = distribution.log_prob(z.to('cpu')).sum(dim=1).mean()
     return -mean_log_proba - log_dets.mean().to('cpu')
@@ -53,7 +21,7 @@ def evaluate(model, dl, device, distribution):
     model.eval()
     with torch.no_grad():
         for x in dl:
-            x = x.to(device)
+            x = x.to(device=device, dtype=torch.double)
             z, log_dets = model(x)
             loss = flow_loss(z, log_dets, distribution)
             val_losses.append(loss.item())
@@ -86,14 +54,13 @@ def train(
             for x in train_dl:
                 model.train()
                 optimizer.zero_grad()
-                x = x.to(device)
+                x = x.to(device=device, dtype=torch.double)
 
                 if first_batch:
                     with torch.no_grad():
                         model(x)
                         first_batch = False
                         continue
-
                 z, log_dets = model(x)
                 loss = flow_loss(z, log_dets, distribution)
                 epoch_losses.append(loss.item())
@@ -143,39 +110,12 @@ def main(args):
     n_scales = args.n_scales
     n_steps = args.n_steps
 
-    model = ECGNormFlow(
-        in_channels,
-        n_scales,
-        n_steps,
-        epsilon=args.actnorm_eps,
-        negative_slope=args.neg_slope,
-        device=device,
-        n_latent_steps=args.n_latent_steps
-    ).to(device)
-
     batch_size = args.batch
-    lr = args.lr
     epochs = args.n_epochs
-    optimizer = Adam(model.parameters(), lr=lr)
-    train_annot, val_annot = utils.train_val_split(
-        args.annot_path, args.val_frac
-    )
-    train_dataset = ECGDatasetFromFile(
-        train_annot,
-        args.path,
-        n_scales,
-        args.n_channels,
-        mean=None if args.no_normalization else utils.medians_mean,
-        std=None if args.no_normalization else utils.medians_std
-    )
-    val_dataset = ECGDatasetFromFile(
-        val_annot,
-        args.path,
-        n_scales,
-        args.n_channels,
-        mean=None if args.no_normalization else utils.medians_mean,
-        std=None if args.no_normalization else utils.medians_std
-    )
+    if args.annot_path:
+        train_dataset, val_dataset = utils.get_datasets_from_file(args)
+    else:
+        train_dataset, val_dataset = utils.get_pickle_datasets(args)
     train_dl = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -185,6 +125,19 @@ def main(args):
     val_dl = DataLoader(
         val_dataset, batch_size=batch_size, num_workers=args.n_workers,
     )
+    signal_len = next(itertools.islice(train_dl, 0, None)).shape[2]
+    model = ECGNormFlow(
+        in_channels,
+        signal_len,
+        n_scales,
+        n_steps,
+        epsilon=args.actnorm_eps,
+        negative_slope=args.neg_slope,
+        device=device,
+        n_latent_steps=args.n_latent_steps
+    ).to(device)
+    lr = args.lr
+    optimizer = Adam(model.parameters(), lr=lr)
 
     model, losses = train(
         model,
