@@ -178,10 +178,7 @@ class FlowScale(nn.Module):
             [FlowStep(2 * in_channels, signal_len // 2, epsilon, negative_slope)
              for _ in range(n_steps)]
         )
-        self.latent_flow_steps = nn.ModuleList(
-            [FlowStep(2 * in_channels, signal_len // 4, epsilon, negative_slope)
-             for _ in range(n_latent_steps)]
-        )
+        self.latent_actnorm = Actnorm(in_channels, signal_len // 2, epsilon)
         self.inv_conv1d = InvConv1d(2 * in_channels)
         self.activate = activate
         self.device = device
@@ -220,23 +217,17 @@ class FlowScale(nn.Module):
             x = self.apply_flow_steps(x, self.flow_steps, w_log_det)
 
         if split:
-            for _ in range(self.scale_n - 1):
-                x = unsqueeze(x)
             x_new, z = x[:, ::2, :], x[:, 1::2, :]
             rolled_x_new = torch.roll(x_new, -1, 2)
             rolled_x_new[:, :, -1] = x_new[:, :, -1]
             z -= (rolled_x_new + x_new) / 2
-            for _ in range(self.scale_n):
-                x_new = squeeze(x_new)
-                z = squeeze(z)
+            x_new = squeeze(x_new)
             if w_log_det:
-                z, log_det_acc2 = self.apply_flow_steps(
-                    z, self.latent_flow_steps, w_log_det
-                )
-                log_det_acc += log_det_acc2
+                z, log_det = self.latent_actnorm(z)
+                log_det_acc += log_det
                 return x_new, z, log_det_acc
             else:
-                z = self.apply_flow_steps(z, self.latent_flow_steps, w_log_det)
+                z = self.latent_actnorm(z, w_log_det=False)
                 return x_new, z
         elif w_log_det:
             return x, log_det_acc
@@ -245,12 +236,8 @@ class FlowScale(nn.Module):
 
     def reverse(self, y, z):
         if z is not None:
-            z = self.apply_flow_steps_reverse(
-                z, self.latent_flow_steps, self.n_latent_steps
-            )
-            for _ in range(self.scale_n):
-                y = unsqueeze(y)
-                z = unsqueeze(z)
+            z = self.latent_actnorm.reverse(z)
+            y = unsqueeze(y)
             rolled_y = torch.roll(y, -1, 2)
             rolled_y[:, :, -1] = y[:, :, -1]
             z += (rolled_y + y) / 2
@@ -259,8 +246,6 @@ class FlowScale(nn.Module):
                                 dtype=y.dtype, device=y.device)
             y_new[:, ::2, :] = y
             y_new[:, 1::2, :] = z
-            for _ in range(self.scale_n - 1):
-                y_new = squeeze(y_new)
             y = y_new
         y = self.apply_flow_steps_reverse(
             y, self.flow_steps, self.n_steps
@@ -308,7 +293,7 @@ class ECGNormFlow(nn.Module):
     def reverse(self, y):
         zs = []
         batch_size = y.shape[0]
-        for i in range(1, self.n_scales):
+        for i in range(0, self.n_scales - 1):
             z, y = y.chunk(2, dim=1)
             z = z.view(batch_size, 2 ** i * self.in_channels, -1)
             zs.append(z)
