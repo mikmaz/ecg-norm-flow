@@ -48,6 +48,7 @@ def train(
         f.write("Training losses:\n")
     with open(f'{stats_path}/val_losses.txt', 'w+') as f:
         f.write("Validation losses:\n")
+    best_val_loss = None
     with tqdm(range(n_epochs)) as pbar:
         for epoch in pbar:
             epoch_losses = []
@@ -97,6 +98,12 @@ def train(
                 val_loss = evaluate(model, val_dl, device, distribution)
                 with open(f'{stats_path}/val_losses.txt', 'a+') as f:
                     f.write(f'{val_loss}\n')
+                if best_val_loss is None or best_val_loss > val_loss:
+                    best_val_loss = val_loss
+                    torch.save(
+                        model.state_dict(),
+                        f"{stats_path}/checkpoint/best_model.pt"
+                    )
             losses.append(sum(epoch_losses) / len(epoch_losses))
 
     return model, losses
