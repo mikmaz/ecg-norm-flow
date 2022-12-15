@@ -110,6 +110,52 @@ class InvLeakyReLU(nn.Module):
         return nn.functional.leaky_relu(y, 1. / self.negative_slope)
 
 
+class AffineCoupling(nn.Module):
+    def __init__(self, in_channels, signal_len):
+        super().__init__()
+
+        self.in_channels = in_channels
+        self.net_1 = nn.Sequential(
+            nn.Linear(in_channels * signal_len // 2,
+                      in_channels * signal_len // 2, dtype=torch.double),
+            nn.ReLU(),
+            nn.Linear(in_channels * signal_len // 2,
+                      in_channels * signal_len // 2, dtype=torch.double),
+        )
+        self.net_2 = nn.Sequential(
+            nn.Linear(in_channels * signal_len // 2,
+                      in_channels * signal_len // 2, dtype=torch.double),
+            nn.ReLU(),
+            nn.Linear(in_channels * signal_len // 2,
+                      in_channels * signal_len // 2, dtype=torch.double),
+        )
+
+    def forward(self, x, w_log_det=True):
+        x_a, x_b = x.chunk(2, 1)
+        batch_size = x_a.shape[0]
+        log_s, t = self.net_1(x_a.view(batch_size, -1)), self.net_2(
+            x_a.view(batch_size, -1))
+        s = torch.sigmoid(log_s + 2)
+        t = t.view(x_b.shape)
+        x_b = (x_b + t) * s.view(x_b.shape)
+        if w_log_det:
+            log_det = torch.sum(torch.log(s), 1)
+            return torch.cat([x_a, x_b], 1), log_det
+        else:
+            return torch.cat([x_a, x_b], 1)
+
+    def reverse(self, y):
+        y_a, y_b = y.chunk(2, 1)
+        batch_size = y_a.shape[0]
+        log_s, t = self.net_1(y_a.view(batch_size, -1)), self.net_2(
+            y_a.view(batch_size, -1))
+        s = torch.sigmoid(log_s + 2).view(y_b.shape)
+        t = t.view(y_b.shape)
+        y_b = y_b / s - t
+
+        return torch.cat([y_a, y_b], 1)
+
+
 class FlowStep(nn.Module):
     __constants__ = ['in_channels', 'epsilon', 'negative_slope']
     in_channels: int
@@ -121,7 +167,7 @@ class FlowStep(nn.Module):
         super(FlowStep, self).__init__()
         self.actnorm = Actnorm(in_channels, signal_len, epsilon)
         self.inv_1x1_conv = InvConv1d(in_channels)
-        self.leaky_relu = InvLeakyReLU(negative_slope)
+        self.leaky_relu = AffineCoupling(in_channels, signal_len)
         self.in_channels = in_channels
         self.epsilon = epsilon
         self.negative_slope = negative_slope
@@ -192,17 +238,17 @@ class FlowScale(nn.Module):
             for step in steps[:-1]:
                 x, log_det = step(x, self.activate)
                 log_det_acc += log_det.to(self.device)
-            x, log_det = steps[-1](x, activate=False)
+            x, log_det = steps[-1](x, activate=True)
             log_det_acc += log_det
             return x, log_det_acc
         else:
             for step in steps[:-1]:
                 x = step(x, False, self.activate)
-            x = steps[-1](x, False, activate=False)
+            x = steps[-1](x, False, activate=True)
             return x
 
     def apply_flow_steps_reverse(self, y, steps, n_steps):
-        y = steps[-1].reverse(y, activate=False)
+        y = steps[-1].reverse(y, activate=True)
         for i in range(-2, -n_steps - 1, -1):
             y = steps[i].reverse(y, self.activate)
         return y
