@@ -106,6 +106,17 @@ def train(
                     )
             losses.append(sum(epoch_losses) / len(epoch_losses))
 
+    utils.sample_from_model(
+        model,
+        distribution,
+        n_channels * n_pixels,
+        'best-model-sample',
+        device,
+        n_channels,
+        n_samples,
+        stats_path
+    )
+
     return model, losses
 
 

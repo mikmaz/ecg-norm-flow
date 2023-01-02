@@ -110,36 +110,52 @@ class InvLeakyReLU(nn.Module):
         return nn.functional.leaky_relu(y, 1. / self.negative_slope)
 
 
+class AffineCouplingNetwork(nn.Module):
+    def __init__(self, signal_len, span=5):
+        super(AffineCouplingNetwork, self).__init__()
+        span = min(signal_len, span)
+        modules = [nn.Sequential(
+            nn.Linear(span, span, dtype=torch.double),
+            nn.ReLU(),
+            nn.Linear(span, span, dtype=torch.double)
+        )]
+        self.nets = nn.ModuleList(
+            [nn.Sequential(
+                nn.Linear(span, span, dtype=torch.double),
+                nn.ReLU(),
+                nn.Linear(span, 1, dtype=torch.double)
+            ) for _ in range(signal_len - span)] + modules
+        )
+        self.span = span
+        self.signal_len = signal_len
+
+    def forward(self, x):
+        batch_size, n_channels, signal_len = x.shape
+        x = x.contiguous().view(-1, signal_len)
+        x = torch.cat(
+            [self.nets[i](x[:, i:i + self.span])
+             for i in range(len(self.nets))],
+            1
+        )
+        return x.contiguous().view(batch_size, n_channels, signal_len)
+
+
 class AffineCoupling(nn.Module):
     def __init__(self, in_channels, signal_len):
-        super().__init__()
+        super(AffineCoupling, self).__init__()
 
         self.in_channels = in_channels
-        self.net_1 = nn.Sequential(
-            nn.Linear(in_channels * signal_len // 2,
-                      in_channels * signal_len // 2, dtype=torch.double),
-            nn.ReLU(),
-            nn.Linear(in_channels * signal_len // 2,
-                      in_channels * signal_len // 2, dtype=torch.double),
-        )
-        self.net_2 = nn.Sequential(
-            nn.Linear(in_channels * signal_len // 2,
-                      in_channels * signal_len // 2, dtype=torch.double),
-            nn.ReLU(),
-            nn.Linear(in_channels * signal_len // 2,
-                      in_channels * signal_len // 2, dtype=torch.double),
-        )
+        self.net_1 = AffineCouplingNetwork(signal_len)
+        self.net_2 = AffineCouplingNetwork(signal_len)
 
     def forward(self, x, w_log_det=True):
         x_a, x_b = x.chunk(2, 1)
         batch_size = x_a.shape[0]
-        log_s, t = self.net_1(x_a.view(batch_size, -1)), self.net_2(
-            x_a.view(batch_size, -1))
+        log_s, t = self.net_1(x_a), self.net_2(x_a)
         s = torch.sigmoid(log_s + 2)
-        t = t.view(x_b.shape)
-        x_b = (x_b + t) * s.view(x_b.shape)
+        x_b = (x_b + t) * s
         if w_log_det:
-            log_det = torch.sum(torch.log(s), 1)
+            log_det = torch.sum(torch.log(s.view(batch_size, -1)), 1)
             return torch.cat([x_a, x_b], 1), log_det
         else:
             return torch.cat([x_a, x_b], 1)
@@ -147,10 +163,8 @@ class AffineCoupling(nn.Module):
     def reverse(self, y):
         y_a, y_b = y.chunk(2, 1)
         batch_size = y_a.shape[0]
-        log_s, t = self.net_1(y_a.view(batch_size, -1)), self.net_2(
-            y_a.view(batch_size, -1))
-        s = torch.sigmoid(log_s + 2).view(y_b.shape)
-        t = t.view(y_b.shape)
+        log_s, t = self.net_1(y_a), self.net_2(y_a)
+        s = torch.sigmoid(log_s + 2)
         y_b = y_b / s - t
 
         return torch.cat([y_a, y_b], 1)

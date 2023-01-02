@@ -187,7 +187,6 @@ def dataset_mean_std(dl, n_channels):
 
 def get_pickle_datasets(args):
     dataset = torch.load(args.path)
-    print(dataset)
     dataset_size = dataset.shape[0]
     perm = torch.randperm(dataset.shape[0])
     val_dataset_size = int(dataset_size * args.val_frac)
