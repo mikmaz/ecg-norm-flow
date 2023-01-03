@@ -111,33 +111,24 @@ class InvLeakyReLU(nn.Module):
 
 
 class AffineCouplingNetwork(nn.Module):
-    def __init__(self, signal_len, span=5):
+    def __init__(self, in_channels, span=5):
         super(AffineCouplingNetwork, self).__init__()
-        span = min(signal_len, span)
-        modules = [nn.Sequential(
-            nn.Linear(span, span, dtype=torch.double),
+        self.net = nn.Sequential(
+            nn.Conv1d(
+                in_channels, in_channels, 3, padding=1, dtype=torch.double
+            ),
             nn.ReLU(),
-            nn.Linear(span, span, dtype=torch.double)
-        )]
-        self.nets = nn.ModuleList(
-            [nn.Sequential(
-                nn.Linear(span, span, dtype=torch.double),
-                nn.ReLU(),
-                nn.Linear(span, 1, dtype=torch.double)
-            ) for _ in range(signal_len - span)] + modules
+            nn.Conv1d(
+                in_channels, in_channels, 1, dtype=torch.double
+            ),
+            nn.ReLU(),
+            nn.Conv1d(
+                in_channels, in_channels * 2, 3, padding=1, dtype=torch.double
+            ),
         )
-        self.span = span
-        self.signal_len = signal_len
 
     def forward(self, x):
-        batch_size, n_channels, signal_len = x.shape
-        x = x.contiguous().view(-1, signal_len)
-        x = torch.cat(
-            [self.nets[i](x[:, i:i + self.span])
-             for i in range(len(self.nets))],
-            1
-        )
-        return x.contiguous().view(batch_size, n_channels, signal_len)
+        return self.net(x)
 
 
 class AffineCoupling(nn.Module):
@@ -145,29 +136,30 @@ class AffineCoupling(nn.Module):
         super(AffineCoupling, self).__init__()
 
         self.in_channels = in_channels
-        self.net_1 = AffineCouplingNetwork(signal_len)
-        self.net_2 = AffineCouplingNetwork(signal_len)
+        self.net = AffineCouplingNetwork(in_channels)
 
-    def forward(self, x, w_log_det=True):
-        x_a, x_b = x.chunk(2, 1)
+    def forward(self, x_a, x_b, w_log_det=True):
+        # x_a, x_b = x.chunk(2, 1)
         batch_size = x_a.shape[0]
-        log_s, t = self.net_1(x_a), self.net_2(x_a)
+        log_s, t = self.net(x_a).chunk(2, 1)
         s = torch.sigmoid(log_s + 2)
         x_b = (x_b + t) * s
         if w_log_det:
             log_det = torch.sum(torch.log(s.view(batch_size, -1)), 1)
-            return torch.cat([x_a, x_b], 1), log_det
+            # return torch.cat([x_a, x_b], 1), log_det
+            return x_a, x_b, log_det
         else:
-            return torch.cat([x_a, x_b], 1)
+            # return torch.cat([x_a, x_b], 1)
+            return x_a, x_b
 
-    def reverse(self, y):
-        y_a, y_b = y.chunk(2, 1)
+    def reverse(self, y_a, y_b):
+        # y_a, y_b = y.chunk(2, 1)
         batch_size = y_a.shape[0]
-        log_s, t = self.net_1(y_a), self.net_2(y_a)
+        log_s, t = self.net(y_a).chunk(2, 1)
         s = torch.sigmoid(log_s + 2)
         y_b = y_b / s - t
-
-        return torch.cat([y_a, y_b], 1)
+        return y_a, y_b
+        #return torch.cat([y_a, y_b], 1)
 
 
 class FlowStep(nn.Module):
@@ -181,7 +173,7 @@ class FlowStep(nn.Module):
         super(FlowStep, self).__init__()
         self.actnorm = Actnorm(in_channels, signal_len, epsilon)
         self.inv_1x1_conv = InvConv1d(in_channels)
-        self.leaky_relu = AffineCoupling(in_channels, signal_len)
+        self.coupling = AffineCoupling(in_channels // 2, signal_len)
         self.in_channels = in_channels
         self.epsilon = epsilon
         self.negative_slope = negative_slope
@@ -190,21 +182,20 @@ class FlowStep(nn.Module):
         if w_log_det:
             x, log_det_act = self.actnorm(x)
             x, log_det_conv = self.inv_1x1_conv(x)
-            if activate:
-                x, log_det_relu = self.leaky_relu(x)
-                return x, log_det_relu + log_det_conv + log_det_act
-            else:
-                return x, log_det_conv + log_det_act
+            x_a, x_b = x.chunk(2, 1)
+            x_a, x_b, log_det_coupling = self.coupling(x_a, x_b)
+            x = torch.cat([x_a, x_b], 1)
+            return x, log_det_coupling + log_det_conv + log_det_act
         else:
             x = self.inv_1x1_conv(self.actnorm(x, False), False)
-            if activate:
-                return self.leaky_relu(x, False)
-            else:
-                return x
+            x_a, x_b = x.chunk(2, 1)
+            x_a, x_b, = self.coupling(x_a, x_b, False)
+            return torch.cat([x_a, x_b], 1)
 
     def reverse(self, y, activate=True):
-        if activate:
-            y = self.leaky_relu.reverse(y)
+        y_a, y_b = y.chunk(2, 1)
+        y_a, y_b = self.coupling.reverse(y_a, y_b)
+        y = torch.cat([y_a, y_b], 1)
         y = self.inv_1x1_conv.reverse(y)
         return self.actnorm.reverse(y)
 
@@ -239,6 +230,7 @@ class FlowScale(nn.Module):
              for _ in range(n_steps)]
         )
         self.latent_actnorm = Actnorm(in_channels, signal_len // 2, epsilon)
+        self.coupling_interpolation = AffineCoupling(in_channels, signal_len)
         self.inv_conv1d = InvConv1d(2 * in_channels)
         self.activate = activate
         self.device = device
@@ -278,15 +270,18 @@ class FlowScale(nn.Module):
 
         if split:
             x_new, z = x[:, ::2, :], x[:, 1::2, :]
-            rolled_x_new = torch.roll(x_new, -1, 2)
-            rolled_x_new[:, :, -1] = x_new[:, :, -1]
-            z -= (rolled_x_new + x_new) / 2
-            x_new = squeeze(x_new)
+            # rolled_x_new = torch.roll(x_new, -1, 2)
+            # rolled_x_new[:, :, -1] = x_new[:, :, -1]
+            # z -= (rolled_x_new + x_new) / 2
             if w_log_det:
-                z, log_det = self.latent_actnorm(z)
-                log_det_acc += log_det
+                x_new, z, log_det_coup = self.coupling_interpolation(x_new, z)
+                x_new = squeeze(x_new)
+                z, log_det_act = self.latent_actnorm(z)
+                log_det_acc += log_det_act + log_det_coup
                 return x_new, z, log_det_acc
             else:
+                x_new, z = self.coupling_interpolation(x_new, z, False)
+                x_new = squeeze(x_new)
                 z = self.latent_actnorm(z, w_log_det=False)
                 return x_new, z
         elif w_log_det:
@@ -298,9 +293,10 @@ class FlowScale(nn.Module):
         if z is not None:
             z = self.latent_actnorm.reverse(z)
             y = unsqueeze(y)
-            rolled_y = torch.roll(y, -1, 2)
-            rolled_y[:, :, -1] = y[:, :, -1]
-            z += (rolled_y + y) / 2
+            y, z = self.coupling_interpolation.reverse(y, z)
+            # rolled_y = torch.roll(y, -1, 2)
+            # rolled_y[:, :, -1] = y[:, :, -1]
+            # z += (rolled_y + y) / 2
             batch_size, n_channels, n_features = y.shape
             y_new = torch.zeros(batch_size, 2 * n_channels, n_features,
                                 dtype=y.dtype, device=y.device)
