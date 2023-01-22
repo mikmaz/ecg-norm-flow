@@ -169,7 +169,7 @@ class FlowStep(nn.Module):
     negative_slope: float
 
     def __init__(self, in_channels, signal_len, epsilon=1e-6,
-                 negative_slope=0.01):
+                 negative_slope=0.01, coupling_swap=False):
         super(FlowStep, self).__init__()
         self.actnorm = Actnorm(in_channels, signal_len, epsilon)
         self.inv_1x1_conv = InvConv1d(in_channels)
@@ -177,25 +177,48 @@ class FlowStep(nn.Module):
         self.in_channels = in_channels
         self.epsilon = epsilon
         self.negative_slope = negative_slope
+        self.coupling_swap = coupling_swap
 
     def forward(self, x, w_log_det=True, activate=True):
         if w_log_det:
             x, log_det_act = self.actnorm(x)
             x, log_det_conv = self.inv_1x1_conv(x)
-            x_a, x_b = x.chunk(2, 1)
-            x_a, x_b, log_det_coupling = self.coupling(x_a, x_b)
-            x = torch.cat([x_a, x_b], 1)
+            # x_a, x_b = x.chunk(2, 1)
+            x_a, x_b = x[:, ::2, :], x[:, 1::2, :]
+            if self.coupling_swap:
+                x_b, x_a, log_det_coupling = self.coupling(x_b, x_a)
+            else:
+                x_a, x_b, log_det_coupling = self.coupling(x_a, x_b)
+            # x = torch.cat([x_a, x_b], 1)
+            x = torch.zeros(x.shape, dtype=torch.double, device=x.device)
+            x[:, ::2, :] = x_a
+            x[:, 1::2, :] = x_b
             return x, log_det_coupling + log_det_conv + log_det_act
         else:
             x = self.inv_1x1_conv(self.actnorm(x, False), False)
-            x_a, x_b = x.chunk(2, 1)
-            x_a, x_b, = self.coupling(x_a, x_b, False)
-            return torch.cat([x_a, x_b], 1)
+            # x_a, x_b = x.chunk(2, 1)
+            x_a, x_b = x[:, ::2, :], x[:, 1::2, :]
+            if self.coupling_swap:
+                x_b, x_a = self.coupling(x_b, x_a, False)
+            else:
+                x_a, x_b = self.coupling(x_a, x_b, False)
+            # x = torch.cat([x_a, x_b], 1)
+            x = torch.zeros(x.shape, dtype=torch.double, device=x.device)
+            x[:, ::2, :] = x_a
+            x[:, 1::2, :] = x_b
+            return x
 
     def reverse(self, y, activate=True):
-        y_a, y_b = y.chunk(2, 1)
-        y_a, y_b = self.coupling.reverse(y_a, y_b)
-        y = torch.cat([y_a, y_b], 1)
+        y_a, y_b = y[:, ::2, :], y[:, 1::2, :]
+        #y_a, y_b = y.chunk(2, 1)
+        if self.coupling_swap:
+            y_b, y_a = self.coupling.reverse(y_b, y_a)
+        else:
+            y_a, y_b = self.coupling.reverse(y_a, y_b)
+        #y = torch.cat([y_a, y_b], 1)
+        y = torch.zeros(y.shape, dtype=torch.double, device=y.device)
+        y[:, ::2, :] = y_a
+        y[:, 1::2, :] = y_b
         y = self.inv_1x1_conv.reverse(y)
         return self.actnorm.reverse(y)
 
@@ -225,10 +248,15 @@ class FlowScale(nn.Module):
                  negative_slope=0.01, activate=True, device=None,
                  n_latent_steps=2):
         super(FlowScale, self).__init__()
-        self.flow_steps = nn.ModuleList(
-            [FlowStep(2 * in_channels, signal_len // 2, epsilon, negative_slope)
-             for _ in range(n_steps)]
-        )
+        self.flow_steps = nn.ModuleList([
+            FlowStep(
+                2 * in_channels,
+                signal_len // 2,
+                epsilon,
+                negative_slope,
+                coupling_swap=i % 2 == 1
+            ) for i in range(n_steps)
+        ])
         self.latent_actnorm = Actnorm(in_channels, signal_len // 2, epsilon)
         self.coupling_interpolation = AffineCoupling(in_channels, signal_len)
         self.inv_conv1d = InvConv1d(2 * in_channels)
