@@ -47,10 +47,11 @@ def test_model_base_density():
         epsilon=args.actnorm_eps,
         negative_slope=args.neg_slope,
         device=device,
-        n_latent_steps=args.n_latent_steps
+        n_latent_steps=args.n_latent_steps,
+        n_filters=args.n_filters
     )
     model.load_state_dict(
-        torch.load(f'{args.stats_path}/checkpoint/final_model.pt',
+        torch.load(f'{args.stats_path}/checkpoint/best_model.pt',
                    map_location=device)
     )
     model.eval()
@@ -124,14 +125,17 @@ def plot_stats(stats_path, n_scales, n_channels, n_pixels):
     ).transpose((1, 0))
     stats_reshaped = np.zeros(stats.shape)
     colors_reshaped = np.zeros(stats.shape[1])
+    print(reshape_to_ecg_flow(
+            torch.tensor(stats[0]).reshape((1, -1)), n_scales, n_channels
+        ).shape)
     for i in range(2):
         stats_reshaped[i] = reshape_to_ecg_flow(
             torch.tensor(stats[i]).reshape((1, -1)), n_scales, n_channels
-        )[0][0].detach().numpy()
+        )[0].detach().view(-1).numpy()
 
     colors = list(mcolors.TABLEAU_COLORS.keys())
     left = 0
-    fig, ax = plt.subplots(4, 1, figsize=(14, 10))
+    fig, ax = plt.subplots(4, 1, figsize=(8, 7))
     for i in range(1, n_scales + 1):
         if i == n_scales:
             r = 2 ** i * n_channels * (n_pixels // 2 ** (2 * i - 1)) + left
@@ -144,30 +148,35 @@ def plot_stats(stats_path, n_scales, n_channels, n_pixels):
                 stats[j, left:r],
                 c=colors[i - 1],
                 label=f'scale={i}',
-                s=3
+                s=1
             )
         left = r
     colors_reshaped = reshape_to_ecg_flow(
         torch.tensor(colors_reshaped).reshape((1, -1)), n_scales, n_channels
-    )[0][0].detach().numpy()
+    )[0].detach().view(-1).numpy()
     colors_reshaped = [
         colors[int(colors_reshaped[i])] for i in range(colors_reshaped.size)
     ]
     for i in range(2):
-        ax[2 * i].set_xlabel(r'$z$ pixel index')
-        ax[2 * i].legend(bbox_to_anchor=(1.0005, 1.0), loc='upper left')
+        ax[2 * i].set_xlabel('$i$ (ordered as in $\mathbf{z}$)')
+        ax[2 * i].legend(bbox_to_anchor=(1.0005, 1.0), loc='upper left', markerscale = 5,
+                         prop={'size': 8})
 
         ax[2 * i + 1].scatter(
-            np.arange(0, n_pixels), stats_reshaped[i], c=colors_reshaped, s=3
+            np.arange(0, n_pixels*n_channels), stats_reshaped[i], c=colors_reshaped, s=1
         )
-        ax[2 * i + 1].set_xlabel(r'$x$ pixel index')
+        ax[2 * i + 1].set_xlabel('$j$ (ordered as in $\mathbf{x}$)')
 
         ax[i].hlines(0, 1, stats[0].size, color='tab:red', alpha=0.5)
-        ax[i].set_ylabel('mean')
+        #ax[i].set_ylabel('mean')
 
         ax[i + 2].hlines(1, 1, stats[0].size, color='tab:red', alpha=0.5)
-        ax[i + 2].set_ylabel('std')
-
+        #ax[i + 2].set_ylabel('std')
+    ax[0].set_ylabel('$\hat{\mu}(\mathbf{z}_i)$')
+    ax[1].set_ylabel('$\hat{\mu}(\mathbf{z}_j)$')
+    ax[2].set_ylabel('$\hat{\sigma}(\mathbf{z}_i)$')
+    ax[3].set_ylabel('$\hat{\sigma}(\mathbf{z}_j)$')
+    """
     ax[0].set_title(
         'Mean of the training samples mapped to the base distribution per pixel'
     )
@@ -180,15 +189,19 @@ def plot_stats(stats_path, n_scales, n_channels, n_pixels):
     ax[3].set_title(
         'The same as above but with pixels reordered as in ECG'
     )
+    """
+    """
     fig.suptitle(
         r'Statistics of $z$ over the training set [last scale output shape=' +
         f'{(2**n_scales * n_channels, n_pixels // 2**(2*n_scales - 1))}]',
         fontsize=16)
+    """
     fig.tight_layout()
-    fig.savefig(f'{stats_path}/plots/stat-of-z.png', dpi=600)
+    fig.savefig(f'{stats_path}/plots/stat-of-z.png', dpi=400)
     plt.show()
 
 
 if __name__ == "__main__":
-    #plot_stats('./experiments/20', 5, 1, 512)
-    test_model_base_density()
+    # plot_stats('./experiments/23', 5, 1, 512)
+    # test_model_base_density()
+    plot_stats('experiments/af-conv/04', 5, 1, 512)

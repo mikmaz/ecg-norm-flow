@@ -152,7 +152,8 @@ def main(args):
         epsilon=args.actnorm_eps,
         negative_slope=args.neg_slope,
         device=device,
-        n_latent_steps=args.n_latent_steps
+        n_latent_steps=args.n_latent_steps,
+        n_filters=args.n_filters
     ).to(device)
     lr = args.lr
     optimizer = Adam(model.parameters(), lr=lr)

@@ -111,19 +111,19 @@ class InvLeakyReLU(nn.Module):
 
 
 class AffineCouplingNetwork(nn.Module):
-    def __init__(self, in_channels, span=5):
+    def __init__(self, in_channels, n_filters=128, span=5):
         super(AffineCouplingNetwork, self).__init__()
         self.net = nn.Sequential(
             nn.Conv1d(
-                in_channels, in_channels, 3, padding=1, dtype=torch.double
+                in_channels, n_filters, 3, padding=1, dtype=torch.double
             ),
             nn.ReLU(),
             nn.Conv1d(
-                in_channels, in_channels, 1, dtype=torch.double
+                n_filters, n_filters, 1, dtype=torch.double
             ),
             nn.ReLU(),
             nn.Conv1d(
-                in_channels, in_channels * 2, 3, padding=1, dtype=torch.double
+                n_filters, in_channels * 2, 3, padding=1, dtype=torch.double
             ),
         )
 
@@ -132,11 +132,10 @@ class AffineCouplingNetwork(nn.Module):
 
 
 class AffineCoupling(nn.Module):
-    def __init__(self, in_channels, signal_len):
+    def __init__(self, in_channels, signal_len, n_filters=128):
         super(AffineCoupling, self).__init__()
-
         self.in_channels = in_channels
-        self.net = AffineCouplingNetwork(in_channels)
+        self.net = AffineCouplingNetwork(in_channels, n_filters=n_filters)
 
     def forward(self, x_a, x_b, w_log_det=True):
         # x_a, x_b = x.chunk(2, 1)
@@ -169,11 +168,11 @@ class FlowStep(nn.Module):
     negative_slope: float
 
     def __init__(self, in_channels, signal_len, epsilon=1e-6,
-                 negative_slope=0.01, coupling_swap=False):
+                 negative_slope=0.01, coupling_swap=False, n_filters=128):
         super(FlowStep, self).__init__()
         self.actnorm = Actnorm(in_channels, signal_len, epsilon)
         self.inv_1x1_conv = InvConv1d(in_channels)
-        self.coupling = AffineCoupling(in_channels // 2, signal_len)
+        self.coupling = AffineCoupling(in_channels // 2, signal_len, n_filters=n_filters)
         self.in_channels = in_channels
         self.epsilon = epsilon
         self.negative_slope = negative_slope
@@ -246,7 +245,7 @@ class FlowScale(nn.Module):
 
     def __init__(self, in_channels, signal_len, n_steps, scale_n, epsilon=1e-6,
                  negative_slope=0.01, activate=True, device=None,
-                 n_latent_steps=2):
+                 n_latent_steps=2, n_filters=128):
         super(FlowScale, self).__init__()
         self.flow_steps = nn.ModuleList([
             FlowStep(
@@ -254,11 +253,12 @@ class FlowScale(nn.Module):
                 signal_len // 2,
                 epsilon,
                 negative_slope,
-                coupling_swap=i % 2 == 1
+                coupling_swap=i % 2 == 1,
+                n_filters=n_filters
             ) for i in range(n_steps)
         ])
         self.latent_actnorm = Actnorm(in_channels, signal_len // 2, epsilon)
-        self.coupling_interpolation = AffineCoupling(in_channels, signal_len)
+        self.coupling_interpolation = AffineCoupling(in_channels, signal_len, n_filters=n_filters)
         self.inv_conv1d = InvConv1d(2 * in_channels)
         self.activate = activate
         self.device = device
@@ -340,13 +340,13 @@ class FlowScale(nn.Module):
 class ECGNormFlow(nn.Module):
     def __init__(self, in_channels, signal_len, n_scales, n_steps, epsilon=1e-6,
                  negative_slope=0.01, activate=True, device=None,
-                 n_latent_steps=2):
+                 n_latent_steps=2, n_filters=128):
         super(ECGNormFlow, self).__init__()
         self.in_channels = in_channels
         self.flow_scales = nn.ModuleList(
             [FlowScale(2 ** i * in_channels, signal_len // 4 ** i, n_steps,
                        i + 1, epsilon, negative_slope, activate, device,
-                       n_latent_steps)
+                       n_latent_steps, n_filters=n_filters)
              for i in range(n_scales)]
         )
         self.n_scales = n_scales

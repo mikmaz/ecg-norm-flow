@@ -37,6 +37,12 @@ def parse_args():
         help="number of flow's steps per scale"
     )
     parser.add_argument(
+        "--n_filters",
+        default=128,
+        type=int,
+        help="number of filters used in affine coupling layer's CNN"
+    )
+    parser.add_argument(
         "--n_latent_steps",
         default=2,
         type=int,
